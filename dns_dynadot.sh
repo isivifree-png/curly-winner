@@ -8,12 +8,10 @@
 
 ########  Public functions #####################
 
-#Usage: add  _acme-challenge.www.domain.com   "XKrxpRBosdIKFzxW_CT3KLZNf6q0HG9i01zxXp5CPBs"
 dns_dynadot_add() {
   fulldomain="$1"
   txtvalue="$2"
 
-  # Загружаем или запрашиваем ключи
   DYNADOT_API_KEY="${DYNADOT_API_KEY:-$(_readaccountconf_mutable DYNADOT_API_KEY)}"
   DYNADOT_API_SECRET="${DYNADOT_API_SECRET:-$(_readaccountconf_mutable DYNADOT_API_SECRET)}"
 
@@ -25,7 +23,6 @@ dns_dynadot_add() {
     return 1
   fi
 
-  # Сохраняем ключи в конфиг аккаунта
   _saveaccountconf_mutable DYNADOT_API_KEY "$DYNADOT_API_KEY"
   _saveaccountconf_mutable DYNADOT_API_SECRET "$DYNADOT_API_SECRET"
 
@@ -37,7 +34,6 @@ dns_dynadot_add() {
   _debug "domain: $_domain"
   _debug "sub_domain: $_sub_domain"
 
-  # Кодируем параметры для API
   domain_enc=$(_url_encode "$_domain")
   txt_enc=$(_url_encode "$txtvalue")
 
@@ -58,7 +54,6 @@ dns_dynadot_add() {
   fi
 }
 
-#Usage: rm  _acme-challenge.www.domain.com   "XKrxpRBosdIKFzxW_CT3KLZNf6q0HG9i01zxXp5CPBs"
 dns_dynadot_rm() {
   fulldomain="$1"
   txtvalue="$2"
@@ -70,7 +65,6 @@ dns_dynadot_rm() {
     DYNADOT_API_KEY=""
     DYNADOT_API_SECRET=""
     _err "You didn't specify Dynadot API key and secret yet."
-    _err "Please set DYNADOT_API_KEY and DYNADOT_API_SECRET and try again."
     return 1
   fi
 
@@ -82,14 +76,12 @@ dns_dynadot_rm() {
     return 1
   fi
 
-  # Ищем record_id существующей записи
   if ! record_id=$(_dynadot_find_record_id "$_domain" "$_sub_domain" "$txtvalue"); then
     _err "Failed to find TXT record"
     return 1
   fi
   _debug "Found record_id: $record_id"
 
-  # Удаляем запись
   if _dynadot_remove_by_id "$_domain" "$record_id"; then
     _info "Removed, OK"
     return 0
@@ -99,11 +91,8 @@ dns_dynadot_rm() {
   fi
 }
 
-####################  Private functions below ##################################
-# _acme-challenge.www.domain.com
-# returns
-#  _sub_domain=_acme-challenge.www
-#  _domain=domain.com
+####################  Private functions ##################################
+
 _get_root() {
   domain="$1"
   i=1
@@ -113,14 +102,10 @@ _get_root() {
     h=$(printf "%s" "$domain" | cut -d . -f "$i"-100)
     _debug "trying root: $h"
     if [ -z "$h" ]; then
-      # not valid
       return 1
     fi
 
-    # Пытаемся получить информацию о домене через API
-    # В случае успеха _dynadot_rest возвращает 0
     if _dynadot_rest "get_domain_info" "domain=$(_url_encode "$h")" 2>/dev/null; then
-      # Проверим, что ответ содержит статус success (на случай ложных срабатываний)
       if _json_contains "$response" "success" "status"; then
         _domain="$h"
         if [ "$h" = "$domain" ]; then
@@ -138,22 +123,20 @@ _get_root() {
   return 1
 }
 
-# ========== Вспомогательная функция вызова API ==========
+# ---------- Надёжный HTTP-клиент с таймаутом ----------
 _dynadot_rest() {
   local command="$1"
   local data="$2"
-  response=""   # глобальная переменная для возврата ответа
+  response=""
 
   if [ -z "$DYNADOT_API_KEY" ] || [ -z "$DYNADOT_API_SECRET" ]; then
-    _err "DYNADOT_API_KEY and DYNADOT_API_SECRET environment variables are required."
+    _err "API credentials missing"
     return 1
   fi
 
-  # Кодируем ключи для безопасной вставки в тело запроса
   local enc_key enc_secret
   enc_key=$(_url_encode "$DYNADOT_API_KEY")
   enc_secret=$(_url_encode "$DYNADOT_API_SECRET")
-
   data="${data}&key=${enc_key}&secret=${enc_secret}"
 
   local url="https://api.dynadot.com/api/v2/${command}"
@@ -161,28 +144,37 @@ _dynadot_rest() {
   _debug "Calling Dynadot API: ${command}"
   _debug "Data length: $(printf '%s' "$data" | wc -c)"
 
-  # Отключаем DEBUG, чтобы данные (включая ключи) не попали в лог curl/wget
-  local _save_debug=""
-  local _save_debug_was_set=false
-  if [ "${DEBUG+x}" ]; then
-    _save_debug_was_set=true
-    _save_debug="$DEBUG"
-  fi
-  DEBUG=''
-
-  response=$(_post "$data" "$url" "" "POST" "application/x-www-form-urlencoded")
-  local ret=$?
-
-  # Восстанавливаем DEBUG
-  if [ "$_save_debug_was_set" = true ]; then
-    DEBUG="$_save_debug"
+  # Используем стандартный подход acme.sh для curl
+  _CURL="${_CURL:-curl}"
+  if command -v "$_CURL" >/dev/null 2>&1; then
+    response=$("$_CURL" -s --connect-timeout 10 --max-time 60 \
+      -X POST -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "$data" "$url" 2>&1)
+    local ret=$?
+    if [ $ret -ne 0 ]; then
+      _err "curl failed with code $ret: $response"
+      return 1
+    fi
   else
-    unset DEBUG
-  fi
-
-  if [ $ret -ne 0 ]; then
-    _err "HTTP request failed (curl/wget error)"
-    return 1
+    _WGET="${_WGET:-wget}"
+    if command -v "$_WGET" >/dev/null 2>&1; then
+      local tmpfile
+      tmpfile="$(mktemp)" || { _err "mktemp failed"; return 1; }
+      "$_WGET" -q --timeout=10 --read-timeout=60 --tries=1 \
+        --header="Content-Type: application/x-www-form-urlencoded" \
+        --post-data="$data" -O "$tmpfile" "$url" 2>/dev/null
+      local ret=$?
+      if [ $ret -ne 0 ]; then
+        _err "wget failed with code $ret"
+        rm -f "$tmpfile"
+        return 1
+      fi
+      response="$(cat "$tmpfile")"
+      rm -f "$tmpfile"
+    else
+      _err "Neither curl nor wget found"
+      return 1
+    fi
   fi
 
   if [ -z "$response" ]; then
@@ -192,23 +184,19 @@ _dynadot_rest() {
 
   _debug "Response: $response"
 
-  # Проверка статуса ответа API
   local api_status
   api_status=$(_json_get "$response" "status")
   if [ "$api_status" = "error" ]; then
     _err "Dynadot API returned an error: $response"
     return 1
   fi
-
   if [ "$api_status" != "success" ]; then
     _err "Unexpected API status: $api_status"
     return 1
   fi
-
   return 0
 }
 
-# ========== Поиск record_id для TXT-записи ==========
 _dynadot_find_record_id() {
   local domain="$1"
   local subdomain="$2"
@@ -224,14 +212,12 @@ _dynadot_find_record_id() {
     return 1
   fi
 
-  # Декодируем массив dns_list в переменные вида dns_list_0_record_id, dns_list_count и т.д.
   if ! _json_decode "$response" "dns_list"; then
     _err "Failed to decode DNS list response"
     return 1
   fi
 
-  # Безопасно извлекаем количество записей
-  eval "count=\"\$dns_list_count\""
+  eval "count=\"\${dns_list_count}\""
   if [ -z "$count" ] || [ "$count" -eq 0 ]; then
     _debug "No DNS records found."
     return 1
@@ -239,10 +225,10 @@ _dynadot_find_record_id() {
 
   local i=0
   while [ $i -lt "$count" ]; do
-    eval "record_id=\"\$dns_list_${i}_record_id\""
-    eval "record_type=\"\$dns_list_${i}_record_type\""
-    eval "record_value=\"\$dns_list_${i}_record_value\""
-    eval "rec_sub=\"\$dns_list_${i}_subdomain\""
+    eval "record_id=\"\${dns_list_${i}_record_id}\""
+    eval "record_type=\"\${dns_list_${i}_record_type}\""
+    eval "record_value=\"\${dns_list_${i}_record_value}\""
+    eval "rec_sub=\"\${dns_list_${i}_subdomain}\""
 
     if [ -n "$record_id" ] && [ "$record_type" = "TXT" ] && [ "$record_value" = "$txtvalue" ] && [ "$rec_sub" = "$subdomain" ]; then
       echo "$record_id"
@@ -255,11 +241,11 @@ _dynadot_find_record_id() {
   return 1
 }
 
-# ========== Удаление записи по ID ==========
 _dynadot_remove_by_id() {
   local domain="$1"
   local record_id="$2"
 
-  local data="domain=$(_url_encode "$domain")&record_id0=$record_id"
+  # Безопасное кодирование record_id
+  local data="domain=$(_url_encode "$domain")&record_id0=$(_url_encode "$record_id")"
   _dynadot_rest "remove_dns" "$data"
 }
