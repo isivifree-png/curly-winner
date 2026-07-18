@@ -2,7 +2,7 @@
 # ~/.acme.sh/dnsapi/dns_dynadot.sh
 # Управление TXT-записями через Dynadot API v2
 #
-# Требуемые переменные окружения (или будут сохранены в account.conf):
+# Требуемые переменные окружения (будут сохранены в account.conf после первого использования):
 # export DYNADOT_API_KEY="ваш_api_key"
 # export DYNADOT_API_SECRET="ваш_secret_key"
 
@@ -93,43 +93,42 @@ dns_dynadot_rm() {
 
 ####################  Private functions ##################################
 
+# Определяет _domain и _sub_domain без обращений к API
 _get_root() {
   domain="$1"
 
-  # Убираем префикс _acme-challenge., чтобы не пытаться найти поддомен через get_domain_info
-  _search_domain="$domain"
-  if echo "$domain" | grep -q '^_acme-challenge\.'; then
-    _search_domain=$(echo "$domain" | sed 's/^_acme-challenge\.//')
-    _debug "Stripped _acme-challenge prefix, will search root starting from: $_search_domain"
+  # Убираем ведущий _acme-challenge., если он есть (он всегда будет при вызове из acme.sh)
+  local search="$domain"
+  if echo "$search" | grep -q '^_acme-challenge\.'; then
+    search=$(echo "$search" | sed 's/^_acme-challenge\.//')
+    _debug "Stripped _acme-challenge prefix, analyzing: $search"
   fi
 
-  i=1
-  while true; do
-    h=$(printf "%s" "$_search_domain" | cut -d . -f "$i"-100)
-    _debug "trying root: $h"
-    if [ -z "$h" ]; then
-      return 1
-    fi
+  # Считаем количество частей (точек)
+  local parts=$(echo "$search" | tr '.' '\n' | grep -c .)
+  _debug "domain parts count: $parts"
 
-    # Запрос get_domain_info только для реального домена (не поддомена)
-    if _dynadot_rest "get_domain_info" "domain=$(_url_encode "$h")"; then
-      if _json_contains "$response" "success" "status"; then
-        _domain="$h"
-        if [ "$h" = "$domain" ]; then
-          _sub_domain=""
-        else
-          _cutlength=$((${#domain} - ${#h} - 1))
-          _sub_domain=$(printf "%s" "$domain" | cut -c "1-$_cutlength")
-        fi
-        return 0
-      fi
-    fi
-    i=$(_math "$i" + 1)
-  done
-  return 1
+  # Если частей 2 (example.com) — это корень.
+  # Если частей > 2 (sub.example.com) — берём последние две.
+  if [ "$parts" -le 2 ]; then
+    _domain="$search"
+  else
+    _domain=$(echo "$search" | awk -F. '{print $(NF-1)"."$NF}')
+  fi
+
+  # Вычисляем _sub_domain (часть перед корнем во входном параметре $domain)
+  if [ "$_domain" = "$domain" ]; then
+    _sub_domain=""
+  else
+    local cutlength=$((${#domain} - ${#_domain} - 1))
+    _sub_domain=$(printf "%s" "$domain" | cut -c "1-$cutlength")
+  fi
+
+  _debug "determined root: $_domain, subdomain: $_sub_domain"
+  return 0
 }
 
-# ---------- Надёжный HTTP-клиент с таймаутом ----------
+# ---------- HTTP-клиент с таймаутами ----------
 _dynadot_rest() {
   local command="$1"
   local data="$2"
