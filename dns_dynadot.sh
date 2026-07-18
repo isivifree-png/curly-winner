@@ -6,6 +6,9 @@
 # export DYNADOT_API_KEY="ваш_api_key"
 # export DYNADOT_API_SECRET="ваш_secret_key"
 
+# --- Глобальные настройки curl (на случай, если _post их не применит) ---
+export _CURL_OPTS="${_CURL_OPTS:---connect-timeout 10 --max-time 60}"
+
 ########  Public functions #####################
 
 dns_dynadot_add() {
@@ -42,10 +45,11 @@ dns_dynadot_add() {
     data="${data}&subdomain=${sub_enc}"
   fi
 
-  _info "Adding TXT record"
+  _info "Adding TXT record for $_sub_domain.$_domain"
   if _dynadot_rest "add_dns" "$data"; then
     _info "Added, OK"
-    _sleep 30
+    # Небольшая пауза для распространения DNS (можно уменьшить или убрать)
+    _sleep 10
     return 0
   else
     _err "Add TXT record error."
@@ -115,7 +119,7 @@ _get_root() {
   return 0
 }
 
-# ---------- HTTP-клиент с гарантированными таймаутами через _post ----------
+# ---------- HTTP-клиент с гарантированными таймаутами ----------
 _dynadot_rest() {
   local command="$1"
   local data="$2"
@@ -133,14 +137,10 @@ _dynadot_rest() {
 
   local url="https://api.dynadot.com/api/v2/${command}"
 
-  # Покажем выполняемую команду для диагностики
-  _debug "EXECUTING: _post \"$data\" \"$url\" \"\" \"POST\" \"application/x-www-form-urlencoded\""
+  _debug "EXECUTING: curl -sS --connect-timeout 10 --max-time 60 -X POST -H 'Content-Type: application/x-www-form-urlencoded' -d '$data' '$url'"
 
-  # Убедимся, что заданы таймауты через _CURL_OPTS
-  export _CURL_OPTS="${_CURL_OPTS:---connect-timeout 10 --max-time 60}"
-
-  # Используем встроенную функцию acme.sh, которая автоматически применит таймауты
-  response=$(_post "$data" "$url" "" "POST" "application/x-www-form-urlencoded")
+  # Явный вызов curl с таймаутами (обход возможных проблем с _post)
+  response=$(_curl -sS --connect-timeout 10 --max-time 60 -X POST -H "Content-Type: application/x-www-form-urlencoded" -d "$data" "$url")
   local ret=$?
 
   if [ $ret -ne 0 ]; then
