@@ -19,7 +19,6 @@ dns_dynadot_add() {
     DYNADOT_API_KEY=""
     DYNADOT_API_SECRET=""
     _err "You didn't specify Dynadot API key and secret yet."
-    _err "Please set DYNADOT_API_KEY and DYNADOT_API_SECRET and try again."
     return 1
   fi
 
@@ -62,9 +61,7 @@ dns_dynadot_rm() {
   DYNADOT_API_SECRET="${DYNADOT_API_SECRET:-$(_readaccountconf_mutable DYNADOT_API_SECRET)}"
 
   if [ -z "$DYNADOT_API_KEY" ] || [ -z "$DYNADOT_API_SECRET" ]; then
-    DYNADOT_API_KEY=""
-    DYNADOT_API_SECRET=""
-    _err "You didn't specify Dynadot API key and secret yet."
+    _err "API credentials missing"
     return 1
   fi
 
@@ -93,42 +90,32 @@ dns_dynadot_rm() {
 
 ####################  Private functions ##################################
 
-# Определяет _domain и _sub_domain без обращений к API
 _get_root() {
   domain="$1"
-
-  # Убираем ведущий _acme-challenge., если он есть (он всегда будет при вызове из acme.sh)
   local search="$domain"
   if echo "$search" | grep -q '^_acme-challenge\.'; then
     search=$(echo "$search" | sed 's/^_acme-challenge\.//')
-    _debug "Stripped _acme-challenge prefix, analyzing: $search"
   fi
 
-  # Считаем количество частей (точек)
   local parts=$(echo "$search" | tr '.' '\n' | grep -c .)
   _debug "domain parts count: $parts"
-
-  # Если частей 2 (example.com) — это корень.
-  # Если частей > 2 (sub.example.com) — берём последние две.
   if [ "$parts" -le 2 ]; then
     _domain="$search"
   else
     _domain=$(echo "$search" | awk -F. '{print $(NF-1)"."$NF}')
   fi
 
-  # Вычисляем _sub_domain (часть перед корнем во входном параметре $domain)
   if [ "$_domain" = "$domain" ]; then
     _sub_domain=""
   else
     local cutlength=$((${#domain} - ${#_domain} - 1))
     _sub_domain=$(printf "%s" "$domain" | cut -c "1-$cutlength")
   fi
-
   _debug "determined root: $_domain, subdomain: $_sub_domain"
   return 0
 }
 
-# ---------- HTTP-клиент с таймаутами ----------
+# ---------- HTTP-клиент с гарантированными таймаутами через _post ----------
 _dynadot_rest() {
   local command="$1"
   local data="$2"
@@ -146,39 +133,19 @@ _dynadot_rest() {
 
   local url="https://api.dynadot.com/api/v2/${command}"
 
-  _debug "Calling Dynadot API: ${command}"
-  _debug "Data length: $(printf '%s' "$data" | wc -c)"
+  # Покажем выполняемую команду для диагностики
+  _debug "EXECUTING: _post \"$data\" \"$url\" \"\" \"POST\" \"application/x-www-form-urlencoded\""
 
-  _CURL="${_CURL:-curl}"
-  if command -v "$_CURL" >/dev/null 2>&1; then
-    response=$("$_CURL" -s --connect-timeout 10 --max-time 60 \
-      -X POST -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "$data" "$url" 2>&1)
-    local ret=$?
-    if [ $ret -ne 0 ]; then
-      _err "curl failed with code $ret: $response"
-      return 1
-    fi
-  else
-    _WGET="${_WGET:-wget}"
-    if command -v "$_WGET" >/dev/null 2>&1; then
-      local tmpfile
-      tmpfile="$(mktemp)" || { _err "mktemp failed"; return 1; }
-      "$_WGET" -q --timeout=10 --read-timeout=60 --tries=1 \
-        --header="Content-Type: application/x-www-form-urlencoded" \
-        --post-data="$data" -O "$tmpfile" "$url" 2>/dev/null
-      local ret=$?
-      if [ $ret -ne 0 ]; then
-        _err "wget failed with code $ret"
-        rm -f "$tmpfile"
-        return 1
-      fi
-      response="$(cat "$tmpfile")"
-      rm -f "$tmpfile"
-    else
-      _err "Neither curl nor wget found"
-      return 1
-    fi
+  # Убедимся, что заданы таймауты через _CURL_OPTS
+  export _CURL_OPTS="${_CURL_OPTS:---connect-timeout 10 --max-time 60}"
+
+  # Используем встроенную функцию acme.sh, которая автоматически применит таймауты
+  response=$(_post "$data" "$url" "" "POST" "application/x-www-form-urlencoded")
+  local ret=$?
+
+  if [ $ret -ne 0 ]; then
+    _err "HTTP request failed with return code $ret"
+    return 1
   fi
 
   if [ -z "$response" ]; then
