@@ -95,17 +95,24 @@ dns_dynadot_rm() {
 
 _get_root() {
   domain="$1"
-  i=1
-  p=1
 
+  # Убираем префикс _acme-challenge., чтобы не пытаться найти поддомен через get_domain_info
+  _search_domain="$domain"
+  if echo "$domain" | grep -q '^_acme-challenge\.'; then
+    _search_domain=$(echo "$domain" | sed 's/^_acme-challenge\.//')
+    _debug "Stripped _acme-challenge prefix, will search root starting from: $_search_domain"
+  fi
+
+  i=1
   while true; do
-    h=$(printf "%s" "$domain" | cut -d . -f "$i"-100)
+    h=$(printf "%s" "$_search_domain" | cut -d . -f "$i"-100)
     _debug "trying root: $h"
     if [ -z "$h" ]; then
       return 1
     fi
 
-    if _dynadot_rest "get_domain_info" "domain=$(_url_encode "$h")" 2>/dev/null; then
+    # Запрос get_domain_info только для реального домена (не поддомена)
+    if _dynadot_rest "get_domain_info" "domain=$(_url_encode "$h")"; then
       if _json_contains "$response" "success" "status"; then
         _domain="$h"
         if [ "$h" = "$domain" ]; then
@@ -117,7 +124,6 @@ _get_root() {
         return 0
       fi
     fi
-    p=$i
     i=$(_math "$i" + 1)
   done
   return 1
@@ -144,7 +150,6 @@ _dynadot_rest() {
   _debug "Calling Dynadot API: ${command}"
   _debug "Data length: $(printf '%s' "$data" | wc -c)"
 
-  # Используем стандартный подход acme.sh для curl
   _CURL="${_CURL:-curl}"
   if command -v "$_CURL" >/dev/null 2>&1; then
     response=$("$_CURL" -s --connect-timeout 10 --max-time 60 \
@@ -245,7 +250,6 @@ _dynadot_remove_by_id() {
   local domain="$1"
   local record_id="$2"
 
-  # Безопасное кодирование record_id
   local data="domain=$(_url_encode "$domain")&record_id0=$(_url_encode "$record_id")"
   _dynadot_rest "remove_dns" "$data"
 }
